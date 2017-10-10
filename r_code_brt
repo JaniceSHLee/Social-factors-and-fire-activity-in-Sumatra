@@ -1,1 +1,180 @@
 # Boosted Regression Tree analysis using R
+
+##### Boosted Regression Trees Method for Riau ######
+rm(list=ls())
+
+# Files prepared by Jocelyne under 'pixel analysis'folder
+setwd("F:/Documents/Manuscripts/Fire_socialdrivers/DataAnalysis/BoostedRegressionTrees/pixel analysis")
+
+library(sp)
+library(raster)
+library(rgdal)
+
+##### Prepare Dataset #####
+
+# Raster files, 1km resolution, 171,754 cells
+fire <- raster("ActiveFireBinary.tif")
+fire.count <- raster("ActiveFireCount.tif")
+
+garbage <- raster("BurnGarbage.tif")
+degfor <- raster("DegradedForests.tif")
+road <- raster("DistancetoRoad.tif")
+gfw.large <- raster("LargePlantations.tif")
+ethnic <- raster("MultiEthnic.tif")
+popdens <- raster("PopDensity.tif")
+pracburn <- raster("PracBurning.tif")
+prev.fire <- raster("PreviousFiresCount.tif")
+rain <- raster("Rainfall.tif")
+slope <- raster("Slope.tif")
+gfw.small <- raster("SmallPlantations.tif")
+susc.peat <- raster("SusceptiblePeatCover.tif")
+
+# Convert to raster brick
+riau <- brick(fire, fire.count, garbage, degfor, road,
+              gfw.large, ethnic, popdens, pracburn,
+              prev.fire, rain, slope, gfw.small, susc.peat)
+df_riau <- as.data.frame(riau, xy = TRUE)
+head(df_riau)
+summary(df_riau) 
+# For most columns, there are 81,835 NA cells. For slope, it's 81,836
+# Remove NA
+df_riau <- as.data.frame(riau, xy = TRUE, na.rm = TRUE)
+summary(df_riau)
+str(df_riau)
+
+# Convert numeric to integer values
+df_riau$ActiveFireBinary <- as.integer(df_riau$ActiveFireBinary)
+df_riau$ActiveFireCount <- as.integer(df_riau$ActiveFireCount)
+df_riau$BurnGarbage <- as.integer(df_riau$BurnGarbage)
+df_riau$DegradedForests <- as.integer(df_riau$DegradedForests)
+df_riau$LargePlantations <- as.integer(df_riau$LargePlantations)
+df_riau$MultiEthnic <- as.integer(df_riau$MultiEthnic)
+df_riau$PracBurning <- as.integer(df_riau$PracBurning)
+df_riau$SmallPlantations <- as.integer(df_riau$SmallPlantations)
+df_riau$SusceptiblePeatCover <- as.integer(df_riau$SusceptiblePeatCover)
+
+str(df_riau)
+
+# Altogether there are 89,918 cells for use. Of this, take 1,000 out for training
+set.seed(101) # Set Seed so that same sample can be reproduced in future also
+# Now Selecting 75% of data as sample from total 'n' rows of the data  
+sample <- sample.int(n = nrow(data), size = floor(.75*nrow(data)), replace = F)
+train <- data[sample, ]
+test  <- data[-sample, ]
+
+set.seed(101)
+# Use 10% for modelling and the rest for independent evaluation
+sample <- sample.int(n = nrow(df_riau), size = floor(0.1*nrow(df_riau)), replace = F)
+train <- df_riau[sample, ]
+test  <- df_riau[-sample, ]
+
+##### Run BRT model #####
+library(survival)
+library(lattice)
+library(splines)
+library(parallel)
+library(gbm)
+library(dismo)
+
+# Fit gbm model and decide what settings to use
+# train dataset
+str(train)
+summary(train)
+
+sum(train$ActiveFireBinary) 
+prop.table(table(train$ActiveFireBinary)) # 96% '0', 4% '1' - this may be too low??
+
+# Use bernoulli distributon with fire as y-var
+fire.tc5.lr01 <- gbm.step(data = train, gbm.x = 5:15, gbm.y = 3,
+                          family = "bernoulli", tree.complexity = 5,
+                          # tree complexity, try 5 for a start
+                          learning.rate = 0.01, bag.fraction = 0.5
+                          # learning rate, try 0.01
+                          # bag.fraction, default 0.75, here use 0.5
+)
+
+# returns with 1150 trees
+# Black solid line represents mean, dotted lines represent 1 std. err.
+# Red line represents the minimum of the mean and green line the optimal number of trees
+
+# variable importance
+summary(fire.tc5.lr01)
+
+# Try variations of tc, lr and bag function
+
+# Simplify the model
+fire.simp <- gbm.simplify(fire.tc5.lr01, n.drops = 5)
+# time-consuming step
+# Predictive power shows trend of increase as variables are removed 
+# - best to remove 1 variable MultiEthnic
+
+fire.simp$pred.list[[1]] # to remove 1 variable - MultiEthnic
+#fire.simp$pred.list[[2]]
+
+# Use the simplified model
+fire.tc5.lr01 <- gbm.step(data = train, gbm.x = fire.simp$pred.list[[1]], gbm.y = 3,
+                           family = "bernoulli", tree.complexity = 5,
+                           # tree complexity, try 5 for a start
+                           learning.rate = 0.01, bag.fraction = 0.5
+                           # learning rate, try 0.01
+                           # bag.fraction, default 0.75, here use 0.5
+)
+# 1350 trees 
+
+# Plot individual plots with variables
+gbm.plot(fire.tc5.lr01, n.plots = 10, write.title = FALSE)
+gbm.plot.fits(fire.tc5.lr01) # fitted values in relation to each predictor value
+
+# Assess the extent to which pairwise interactons exist in the dataset
+find.int <- gbm.interactions(fire.tc5.lr01)
+find.int$interactions
+find.int$rank.list
+# Rainfall has strong interactions with PopDens, Previous Fires, Roads, DegFor and Slope
+
+# Plot pairwise interactions for Rainfall (8) and PopDen (5)
+gbm.perspec(fire.tc5.lr01, 8, 5, y.range = c(15,20), z.range = c(0,0.6))
+
+# Predict to new dataset
+preds <- predict.gbm(fire.tc5.lr01, test,
+                     #using previous model, data
+                     n.trees = fire.tc5.lr01$gbm.call$best.trees, type = "response"
+                     # no. trees from previous model, type of response
+)
+
+str(preds)
+calc.deviance(obs = test$ActiveFireBinary, pred = preds, calc.mean = TRUE)                     
+d <- cbind(test$ActiveFireBinary, preds)
+pres <- d[d[,1]==1, 2]
+abs <- d[d[,1]==0, 2]
+str(d)
+head(d)
+str(pres)
+str(abs)
+e <- evaluate(p=pres, a=abs)
+e
+# AUC of 0.75
+
+# Predict to a varying number of trees
+# Predict to a vector of trees
+fire.5000 <- gbm.fixed(data = train, gbm.x = 5:15, gbm.y = 3, learning.rate = 0.01,
+                         tree.complexity = 5, n.trees = 5000)
+
+tree.list <- seq(100, 5000, by = 100)
+pred <- predict.gbm(fire.5000, test, n.trees=tree.list, "response")
+
+# Spatial prediction
+
+# Plot raster brick
+plot(riau)
+
+p <- predict(riau, fire.tc5.lr01,
+             # rasterbrick layer, model
+             n.trees=fire.tc5.lr01$gbm.call$best.trees, type = "response"
+             # no. of trees from model, type of response
+)
+
+p <- mask(p, raster(riau, 1))
+
+str(p)
+
+plot(p, main = "Fire in Riau - BRT predicton")
